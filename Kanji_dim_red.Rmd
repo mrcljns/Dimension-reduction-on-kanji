@@ -1,0 +1,199 @@
+---
+title: "Kanji dimension reduction"
+author: "Maciej Lorens"
+date: "2022-12-24"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 2
+    number_sections: false
+    theme: readable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction
+
+"Kanji" are the Japanese logographic characters borrowed from the Chinese writing system. They are, at least in my opinion, the most difficult part of learning the Japanese language. According to Wikipedia, there are nearly 3000 kanji used in Japanese names and in common communication. That's about 115 times more characters than any European person has to learn! This made me wonder, whether dimension reduction techniques can ease the process of teaching myself kanji? I decided to verify this by visualizing groups of similar looking Japanese characters in the two-dimensional space. Oftentimes, I find myself being reminded of some kanji when looking at an unknown one, because of a similar shape or mutually shared radical. If I will succeed in finding these similarities, it will be much easier to find the Japanese character and look up its meaning.
+
+# Data
+
+It would not be optimal for computation or interpretation to include every kanji there is, therefore I will limit myself to a hundred jouyou kanji. It is a set of 2136 kanji taught in Japanese schools, the first hundred being characters studied by first graders.
+
+```{r message=FALSE}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(png, rlang, factoextra, Rtsne, ggplot2, imager)
+
+jouyou <- scan("Jouyou.txt", what="character")
+```
+
+## Obtaining the data
+
+The most popular kanji datasets are reminiscent of the MNIST dataset, but handwritten characters will not be particularly helpful here. What I'm looking for are clear images of characters as they are used during printing, on the internet etc. The simplest approach is to get images of kanji from computer fonts. In R this can be done by creating an empty plot and adding a large text annotation with the desired symbol. The plot can then be saved and used for the analysis. I presented this approach below.
+
+```{r}
+char_img <- function(kanji){
+  par(mar=rep(0,4), oma=rep(0,4))
+  png(file=gsub(" ", "", paste("jkanji/", kanji, ".png")))
+  par(mar=rep(0,4))
+  plot(c(0, 1), c(0, 1), ann = F, bty = 'n', type = 'n', xaxt = 'n', yaxt = 'n')
+  text(x = 0.5, y = 0.5, paste(kanji), cex = 40, col = "black", family="serif", font=2)
+  dev.off()
+}
+
+for (kanji in jouyou[c(1:100)]){
+  char_img(kanji)
+}
+```
+
+The text annotation requires a large image, so resizing it might help reduce the computation time. Library "ImageR" has this functionality implemented.
+
+```{r}
+jouyou_in_folder<-list.files(path="jkanji")
+
+for (kanji in jouyou_in_folder) {
+  im <- load.image(gsub(" ", "", paste("jkanji/", kanji)))
+  im <- resize(im, 64, 64)
+  save.image(im, file=gsub(" ", "", paste("jkanji/", kanji)))
+}
+```
+
+I can now import the images of a hundred jouyou kanji. The images are reshaped into a one dimensional vector and put into rows of a data frame.
+
+```{r}
+kanji_df<-data.frame(matrix(ncol = 4097, nrow = 0))
+
+for (i in seq_along(jouyou_in_folder)){
+  im <- readPNG(paste("jkanji", jouyou_in_folder[i], sep='/'))
+  im <- matrix(im[,,1], 64, 64)
+  im <- matrix(t(im)[,ncol(im):1], 64, 64)
+  im <- as.vector(im)
+  kanji_df<-rbind(kanji_df, append(substring(jouyou_in_folder[i],1,1), im))
+}
+```
+
+# Analysis
+
+In order to generate the two-dimensional representations of each kanji, I will use Principal Components Analysis (PCA) and t-distributed Stochastic Neighbor Embedding (t-SNE).
+
+## PCA
+
+### What is PCA?
+
+Principal Components Analysis is probably the most popular dimension reduction technique out there. It utilizes eigenvectors and eigenvalues to establish new features that explain the most variance in the data.
+
+### Explained variance
+
+```{r}
+kanji_df[, c(2:4097)] <- lapply(kanji_df[, c(2:4097)], as.numeric)
+
+set.seed(1)
+kanji_pca <- prcomp(kanji_df[2:4097])
+
+fviz_eig(kanji_pca)
+```
+
+```{r}
+plot(cumsum(kanji_pca$sdev^2 / sum(kanji_pca$sdev^2))[c(1:10)], col="blue", 
+     type="b", pch=15, xlab="Principal Component", 
+     ylab="Cumulative Explained Variance")
+```
+
+Keeping only two principal components lets me keep about 15% of variance in data, which probably not enough to get meaningful results.
+
+### Plotting characters in a two-dimensional space
+
+```{r}
+pca_df <- data.frame(kanji_pca[['x']][,c(1:2)])
+pca_df$label <- kanji_df[, 1]
+```
+
+```{r echo=FALSE}
+ggplot(pca_df) +
+geom_text(aes(x=pca_df[,1], y=pca_df[,2], label=label, color=label), show.legend = FALSE) +
+  xlab("1st principal component") + ylab("2nd principal component")
+```
+
+The results provided by the two principal components are certainly not ideal. There's a lot of chaos and associations found between characters that share no similarity whatsoever, like the 五 (five) and 円 (yen) symbols.
+
+### Retrieving the images from two principal components {.tabset}
+
+As a bonus, I will check what the character images look like when we include only the variance explained by two principal components. This requires reversing the computations done by PCA. Also, it might give me an answer why finding similarities between the characters failed.
+
+```{r}
+retrieved_df <- t(t(kanji_pca$x[,c(1:2)] %*% t(kanji_pca$rotation[,c(1:2)])) + kanji_pca$center)
+
+retrieved_df <- cbind(pca_df$label, retrieved_df)
+```
+
+#### Original images
+
+```{r echo=FALSE}
+# Plotting the original images
+par(mfrow=c(5,5)) 
+par(mar=c(1,1,1,1))
+
+for (i in c(1:25)){
+  image_to_plot <- matrix(as.numeric(kanji_df[i, c(2:4097)]), nrow=64, ncol=64)
+  
+  image(image_to_plot,axes=FALSE,useRaster=TRUE,col=gray.colors("10"))
+}
+```
+
+#### Retrieved images
+
+```{r echo=FALSE}
+# Plotting the retrieved images
+par(mfrow=c(5,5)) 
+par(mar=c(1,1,1,1))
+
+for (i in c(1:25)){
+  image_to_plot <- matrix(as.numeric(retrieved_df[i, c(2:4097)]), nrow=64, ncol=64)
+  
+  image(image_to_plot,axes=FALSE,useRaster=TRUE,col=gray.colors("10"))
+}
+
+par(mfrow=c(1,1))
+```
+
+These representations are barely reminiscent of the originals. It doesn't surprise then, that PCA failed in providing good visualization.
+
+## T-SNE
+
+### What is t-SNE?
+
+t-distributed Stochastic Neighbor Embedding is a statistical method for visualizing high-dimensional data in a space of two or three dimensions. The algorithm computes conditional probabilities of two points being neighbors with each point as a center and then aims to learn a map of new points. The distribution of these new points is determined by using gradient descent to minimize the Kullback-Leibler divergence. t-SNE also defines a perplexity hyperparameter that controls the variance used in the initial probability distribution. Higher perplexity will make the data points more clustered with its neighbors.
+
+### Plotting the characters in a two-dimensional space
+
+```{r}
+set.seed(1)
+kanji_tsne <- Rtsne(kanji_df, dims=2, initial_dims=60, max_iter=1000, pca=FALSE,
+                    perplexity=10)
+
+tsne_df <- data.frame(kanji_tsne[['Y']])
+tsne_df$label <- kanji_df[, 1]
+```
+
+```{r echo=FALSE}
+ggplot(tsne_df) +
+  geom_text(aes(x=X1, y=X2, label=label, color=label), show.legend = FALSE)
+```
+
+The results of t-SNE are quite amazing. It is clearly visible that characters which share radicals or have similar shapes are close to each other. For example, the kanji that contain the 人 (person) or 大 (big) radical are close to each other. As expected though, position of the radical is key. The ハ (fins) symbol is close to the 六 (six) kanji, but further from the 分 (sword) and 公 (public) characters.
+
+# Conclusion
+
+The objective of this paper was to find similar kanji by plotting them in a two-dimensional space. PCA wasn't enough for this task, as two principal components didn't explain enough variance. T-SNE gave much better results, putting characters that look alike or have mutual radicals together. The next step would be to use these representations for creating a dataset of kanji, where each one has a few neighbors assigned to them.
+
+Sources:
+
+<https://en.wikipedia.org/wiki/Kanji>
+
+<https://towardsdatascience.com/t-sne-clearly-explained-d84c537f53a>
+
+<https://en.wikipedia.org/wiki/T-distributed_stochastic_neighbor_embedding>
